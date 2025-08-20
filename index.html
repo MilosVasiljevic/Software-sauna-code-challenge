@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Path Follower Visualizer</title>
+<style>
+  body { font-family: sans-serif; margin: 2em; }
+  textarea { width: 100%; font-family: monospace; }
+  #output { margin-top: 1em; padding: 1em; background: #eef; white-space: pre;  }
+  button { margin-top: 0.5em; padding: 0.5em 1em; }
+  .highlight { background: yellow; color: red; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h2>Path Follower Visualizer</h2>
+<p>Paste or type your map in textarea, and click "Run" to test it.</p>
+<textarea id="mapInput" rows="10" placeholder=""></textarea>
+<br>
+<button id="runBtn">Run</button>
+<div id="output"></div>
+
+
+<script>
+
+  // allowed characters
+  const ALLOWED = new Set(["@", "x", "-", "|", "+", " ", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("")]);
+
+  // move by one "field"
+  const DIRS = {
+    UP:    { dx: 0, dy: -1, axis: "V", name: "UP" },
+    DOWN:  { dx: 0, dy:  1, axis: "V", name: "DOWN" },
+    LEFT:  { dx: -1,dy:  0, axis: "H", name: "LEFT" },
+    RIGHT: { dx: 1, dy:  0, axis: "H", name: "RIGHT" },
+  };
+  const OPP = { UP: "DOWN", DOWN: "UP", LEFT: "RIGHT", RIGHT: "LEFT" };
+
+  const isLetter = (ch) => typeof ch === "string" && ch.length === 1 && ch >= "A" && ch <= "Z";
+  const isPathChar = (ch) => typeof ch === "string" && ch !== " " && ALLOWED.has(ch);
+
+  class Grid {
+    constructor(lines) { this.lines = lines.slice(); }
+    h() { return this.lines.length; }
+    w(y) { return (this.lines[y] ?? "").length; }
+    get(x, y) { return y < 0 || y >= this.h() || x < 0 || x >= this.w(y) ? " " : (this.lines[y][x] ?? " "); }
+    set(x, y, ch) { const row = this.lines[y] || ""; this.lines[y] = row.substring(0,x) + ch + row.substring(x+1); }
+    countChar(ch) { return this.lines.join("").split("").filter(c => c === ch).length; }
+    findChar(ch) {
+      const pos = [];
+      for (let y = 0; y < this.h(); y++) {
+        const row = this.lines[y] || "";
+        let idx = row.indexOf(ch);
+        while (idx !== -1) {
+          pos.push({ x: idx, y });
+          idx = row.indexOf(ch, idx + 1);
+        }
+      }
+      return pos;
+    }
+
+    // check for invalid characters
+    validateAllowed() {
+      for (let y = 0; y < this.h(); y++) {
+        const row = this.lines[y] || "";
+        for (let x = 0; x < row.length; x++) {
+          const ch = row[x];
+          if (!ALLOWED.has(ch)) throw new Error(`Invalid character '${ch}' at (${x},${y})`);
+        }
+      }
+    }
+  }
+
+
+  function charSupportsAxis(ch, axis) {
+    if (ch === "@" || ch === "x") return true;
+    if (ch === "|") return axis === "V";
+    if (ch === "-") return axis === "H";
+    if (ch === "+") return true;
+    if (isLetter(ch)) return true;
+    return false;
+  }
+
+
+  // lookahead rule: allow passing through a mismatched direction characters if the next cell supports current axis
+  function supportsAxisWithLookahead(grid, x, y, dir) {
+
+    const ch = grid.get(x, y);
+    if (!isPathChar(ch)) return false;
+    if (charSupportsAxis(ch, dir.axis)) return true;
+
+    if (dir.axis === "V" && ch === '-') { // check when direction vertical and next position is "-"
+      const nx = x + dir.dx, ny = y + dir.dy;
+      const nextCh = grid.get(nx, ny);
+      return isPathChar(nextCh) && charSupportsAxis(nextCh, "V");
+    }
+    if (dir.axis === "H" && ch === '|') { // for horisontal direction
+      const nx = x + dir.dx, ny = y + dir.dy;
+      const nextCh = grid.get(nx, ny);
+      return isPathChar(nextCh) && charSupportsAxis(nextCh, "H");
+    }
+    return false;
+  }
+
+  // get characters on neighbor positions
+  function neighbors(grid, x, y) {
+    return [
+      { dir: DIRS.UP,    ch: grid.get(x, y - 1), x, y: y - 1 },
+      { dir: DIRS.DOWN,  ch: grid.get(x, y + 1), x, y: y + 1 },
+      { dir: DIRS.LEFT,  ch: grid.get(x - 1, y), x: x - 1, y },
+      { dir: DIRS.RIGHT, ch: grid.get(x + 1, y), x: x + 1, y },
+    ];
+  }
+
+  // choose start directions
+  function chooseStartDirection(grid, sx, sy) {
+    const opts = neighbors(grid, sx, sy).filter(n => isPathChar(n.ch) && supportsAxisWithLookahead(grid, n.x, n.y, n.dir));
+    if (opts.length === 0) throw new Error("Broken path: no path from start");
+    if (opts.length > 1) throw new Error("Multiple starting paths");
+    return opts[0].dir;
+  }
+
+  // fidn start and end, and check if they are only one
+  function validateEndpoints(grid) {
+    const starts = grid.findChar("@");
+    const ends = grid.findChar("x");
+    if (starts.length === 0) throw new Error("Missing start character '@'");
+    if (starts.length > 1) throw new Error("Multiple starts");
+    if (ends.length === 0) throw new Error("Missing end character 'x'");
+    return { start: starts[0], end: ends[0] };
+  }
+
+
+  function walk(lines) {
+    const grid = new Grid(lines);
+    grid.validateAllowed(); // check allowed chars
+    const { start } = validateEndpoints(grid); // check and get endpoints
+    let dir = chooseStartDirection(grid, start.x, start.y);
+
+    const visited = new Set(); // take care of already visited positions
+    const letters = [];
+    const pathChars = [];
+
+    let x = start.x, y = start.y;
+    pathChars.push(grid.get(x, y)); // put visited position
+
+    const maxSteps = Math.max(1000, lines.reduce((a, l) => a + (l ? l.length : 0), 0) * 5); //dont go forever
+    let steps = 0;
+
+    // start walking
+    while (steps++ < maxSteps) {
+      const nx = x + dir.dx, ny = y + dir.dy; // new position
+      const ch = grid.get(nx, ny);
+      if (!isPathChar(ch)) throw new Error("Broken path"); // if no path, throw error
+
+      if (!supportsAxisWithLookahead(grid, nx, ny, dir)) { // check for wrong axis
+        throw new Error("Fake turn or wrong axis");
+      }
+
+      // add to path
+      pathChars.push(ch);
+
+      // record result in the end
+      if (ch === 'x') {
+        return { letters: letters.join(''), path: pathChars.join('') };
+      }
+
+      // on crossroad
+      if (ch === '+') {
+        const fx = nx + dir.dx, fy = ny + dir.dy;
+        const canStraight = supportsAxisWithLookahead(grid, fx, fy, dir); // get next position and check if can go straight
+
+        // get possible neighbor positions
+        const opts = neighbors(grid, nx, ny).filter(n => OPP[dir.name] !== n.dir.name && supportsAxisWithLookahead(grid, n.x, n.y, n.dir));
+        const perp = opts.filter(n => n.dir.axis !== dir.axis);
+
+        if (canStraight) { // can go straight but with no alternatives
+          if (perp.length === 0) throw new Error("Fake '+' without perpendicular connection");
+        } else { 
+          if (perp.length !== 1) throw new Error("Fork in path or broken '+'"); // fork in path, or no path after +
+          dir = perp[0].dir;
+        }
+      } else if (isLetter(ch)) {
+        const key = `${nx},${ny}`;
+        if (!visited.has(key)) { letters.push(ch); visited.add(key); } // push to letters if not visited before
+
+        // prefer to go straight if possible
+        const fx = nx + dir.dx, fy = ny + dir.dy;
+        if (supportsAxisWithLookahead(grid, fx, fy, dir)) {
+          // keep direction
+        } else {
+          // must turn
+          const options = neighbors(grid, nx, ny).filter(n => OPP[dir.name] !== n.dir.name && supportsAxisWithLookahead(grid, n.x, n.y, n.dir));
+          const turns = options.filter(n => n.dir.axis !== dir.axis);
+          if (turns.length !== 1) throw new Error("Fork in path or fake turn at letter"); // cant turn after letter
+          dir = turns[0].dir;
+        }
+      } else {
+        // '-' or '|' — nothing special, continue
+      }
+
+      x = nx; y = ny; // change position
+    }
+
+    throw new Error("Did not reach end 'x' (possible loop)");
+  }
+
+  const PathFollower = { walk };
+
+  // collection of maps with no error
+  const MAPS = {
+    basic: [
+      "  @---A---+",
+      "          |",
+      "  x-B-+   C",
+      "      |   |",
+      "      +---+",
+    ],
+    intersections: [
+      "  @",
+      "  | +-C--+",
+      "  A |    |",
+      "  +---B--+",
+      "    |      x",
+      "    |      |",
+      "    +---D--+",
+    ],
+    letterTurns: [
+      "  @---A---+",
+      "          |",
+      "  x-B-+   |",
+      "      |   |",
+      "      +---C",
+    ],
+    noDoubleCollect: [
+      "     +-O-N-+",
+      "     |     |",
+      "     |   +-I-+",
+      " @-G-O-+ | | |",
+      "     | | +-+ E",
+      "     +-+     S",
+      "             |",
+      "             x",
+    ],
+    compact: [
+      " +-L-+",
+      " |  +A-+",
+      "@B+ ++ H",
+      " ++    x",
+    ],
+    ignoreAfterEnd: [
+      "  @-A--+",
+      "       |",
+      "       +-B--x-C--D",
+    ],
+    custom: [
+      "@",
+      "|",
+      "-",
+      "|",
+      "OKx"
+    ]
+  };
+
+  // tiny test runner
+  function test(name, fn) {
+    try { fn(); console.log(` ${name}`); }
+    catch (e) { console.error(` ${name}:`, e.message); throw e; }
+  }
+
+  // run good maps and check if letters and path matches
+  function runAcceptanceTests() {
+    const cases = [
+      { map: MAPS.basic, letters: "ACB", path: "@---A---+|C|+---+|+-B-x" },
+      { map: MAPS.intersections, letters: "ABCD", path: "@|A+---B--+|+--C-+|-||+---D--+|x" },
+      { map: MAPS.letterTurns, letters: "ACB", path: "@---A---+|||C---+|+-B-x" },
+      { map: MAPS.noDoubleCollect, letters: "GOONIES", path: "@-G-O-+|+-+|O||+-O-N-+|I|+-+|+-I-+|ES|x" },
+      { map: MAPS.compact, letters: "BLAH", path: "@B+++B|+-L-+A+++A-+Hx" },
+      { map: MAPS.ignoreAfterEnd, letters: "AB", path: "@-A--+|+-B--x" },
+      { map: MAPS.custom, letters: "OK", path: "@|-|OKx" },
+    ];
+    cases.forEach(({map, letters, path}, i) => {
+      test(`Acceptance #${i+1}`, () => {
+        const { letters: L, path: P } = walk(map);
+        if (L !== letters) throw new Error(`Letters mismatch: got '${L}', expected '${letters}'`);
+        if (P !== path) throw new Error(`Path mismatch: got '${P}', expected '${path}'`);
+      });
+    });
+  }
+
+// test maps with errors
+function runInvalidMapTests() {
+  const bad = [
+    { map: [
+        "     -A---+",
+        "          |",
+        "  x-B-+   C",
+        "      |   |",
+        "      +---+",
+      ], msg: "Missing start character '@'" },
+    { map: [
+        "   @--A---+",
+        "          |",
+        "    B-+   C",
+        "      |   |",
+        "      +---+",
+      ], msg: "Missing end character X" },
+    { map: ["  x-B-@-A-x"], msg: "Multiple starting paths" },
+    { map: ["  @-A-+-B-x"], msg: "Fake '+' without perpendicular connection" },
+    { map: ["  @-A B-x"], msg: "Fork in path or wrong turn" },
+    { map: [
+        "   @-A-+",
+        "      | ",
+        "      | ",
+        "      ",  
+      ], msg: "Missing end character X" },
+    { map: [
+        "   @",
+        "    ",
+        "   x",
+      ], msg: "Broken path: no path from start" },
+    { map: [
+        "   @@-A-x",
+      ], msg: "Multiple starts" },
+
+  ];
+
+  bad.forEach(({map, msg}, i) => {
+    test(`Invalid map #${i+1} (${msg})`, () => {
+      let threw = false;
+      try {
+        PathFollower.walk(map);
+      } catch (e) {
+        threw = true;
+      }
+      if (!threw) throw new Error("Expected an error but none was thrown");
+    });
+  });
+}
+
+
+  function runUnitTests() {
+    test("Start has exactly one outgoing path", () => {
+      const map = [" @-A", "   x"];
+      const grid = new Grid(map);
+      const { start } = validateEndpoints(grid);
+      const d = chooseStartDirection(grid, start.x, start.y);
+      if (d.name !== "RIGHT") throw new Error("Start direction should be RIGHT");
+    });
+  }
+
+  function runAllTests() { runAcceptanceTests(); runInvalidMapTests(); runUnitTests();  }
+
+  window.PathFollower = { walk, MAPS, runAllTests, runAcceptanceTests , runInvalidMapTests, runUnitTests};
+
+  // Your custom map could be tested in console with function walk(). Example: walk(["@-A-x"]);
+  // You can run all tests by typing in console: runAllTests()
+
+
+
+  /* ---------- UI ---------- */
+
+  const textarea=document.getElementById("mapInput");
+  const button=document.getElementById("runBtn");
+  const output=document.getElementById("output");
+
+
+  button.addEventListener("click",()=>{
+    const map=textarea.value.split("\n");
+    try{
+      const result=PathFollower.walk(map);
+      output.textContent=`Characters: ${result.letters}\nPath: ${result.path}`;
+    }catch(e){ output.textContent=`Error: ${e.message}`; }
+  });
+
+</script>
+
+</body>
+</html>
